@@ -1,0 +1,79 @@
+services:
+
+  # ── Ollama LLM runtime ─────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: htmlforge-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_HOST=0.0.0.0
+    # ── Uncomment to enable NVIDIA GPU ──────────────────────────────────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Model puller (runs once on first boot) ─────────────────────────────────
+  model-puller:
+    image: curlimages/curl:latest
+    container_name: htmlforge-model-puller
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-qwen2.5:7b}
+      - VISION_MODEL=${VISION_MODEL:-}
+    entrypoint: >
+      sh -c "
+        echo '→ Pulling text model: '$$DEFAULT_MODEL &&
+        curl -s -X POST http://ollama:11434/api/pull
+          -H 'Content-Type: application/json'
+          -d '{\"name\":\"'$$DEFAULT_MODEL'\"}'
+          --no-buffer | grep -E '(status|error)' | tail -3 &&
+        if [ -n \"$$VISION_MODEL\" ]; then
+          echo '→ Pulling vision model: '$$VISION_MODEL &&
+          curl -s -X POST http://ollama:11434/api/pull
+            -H 'Content-Type: application/json'
+            -d '{\"name\":\"'$$VISION_MODEL'\"}'
+            --no-buffer | grep -E '(status|error)' | tail -3
+        fi &&
+        echo '✓ Models ready.'
+      "
+
+  # ── HTML Forge frontend (Nginx) ────────────────────────────────────────────
+  frontend:
+    image: nginx:alpine
+    container_name: htmlforge-ui
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "${UI_PORT:-8080}:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  ollama_data:
+    name: htmlforge-ollama-models
